@@ -103,9 +103,26 @@ def get_binary_path():
     return binary
 
 
+def _setup_lib_path():
+    """Add bundled shared libraries to the library search path."""
+    lib_dir = os.path.join(os.path.dirname(__file__), "lib")
+    if not os.path.isdir(lib_dir):
+        return
+    if sys.platform == "darwin":
+        env_var = "DYLD_LIBRARY_PATH"
+    else:
+        env_var = "LD_LIBRARY_PATH"
+    existing = os.environ.get(env_var, "")
+    if existing:
+        os.environ[env_var] = lib_dir + os.pathsep + existing
+    else:
+        os.environ[env_var] = lib_dir
+
+
 def main():
     """Execute the bundled binary."""
     binary = get_binary_path()
+    _setup_lib_path()
 
     if sys.platform == "win32":
         # On Windows, use subprocess to properly handle signals
@@ -207,6 +224,7 @@ def build_wheel(
     license_: str | None = None,
     url: str | None = None,
     readme_content: str | None = None,
+    extra_libs: list[str] | None = None,
 ) -> str:
     """Build a wheel file from a pre-built binary."""
     normalized_name = normalize_package_name(name)
@@ -224,6 +242,11 @@ def build_wheel(
     files[f"{import_name}/__init__.py"] = init_content
     files[f"{import_name}/__main__.py"] = main_content
     files[f"{import_name}/bin/{binary_name}"] = binary_content
+
+    for lib_path in extra_libs or []:
+        lib_name = Path(lib_path).name
+        with open(lib_path, "rb") as f:
+            files[f"{import_name}/lib/{lib_name}"] = f.read()
 
     dist_info = f"{normalized_name}-{version}.dist-info"
 
@@ -258,7 +281,7 @@ def build_wheel(
 
     with zipfile.ZipFile(wheel_path, "w", zipfile.ZIP_DEFLATED) as whl:
         for file_path, content in files.items():
-            if "/bin/" in file_path:
+            if "/bin/" in file_path or "/lib/" in file_path:
                 info = zipfile.ZipInfo(file_path)
                 # Set Unix permissions: rwxr-xr-x (0755)
                 info.external_attr = (
@@ -368,6 +391,7 @@ def build_wheels(
     license_: str | None = None,
     url: str | None = None,
     readme: str | None = None,
+    extra_libs: list[str] | None = None,
 ) -> list[str]:
     """Build Python wheels from pre-built binaries.
 
@@ -384,6 +408,7 @@ def build_wheels(
         license_: License identifier
         url: Project URL
         readme: Path to README markdown file
+        extra_libs: Paths to shared libraries to bundle
 
     Returns:
         List of paths to built wheel files
@@ -429,6 +454,7 @@ def build_wheels(
             license_=license_,
             url=url,
             readme_content=readme_content,
+            extra_libs=extra_libs,
         )
 
         built_wheels.append(wheel_path)
@@ -517,6 +543,7 @@ def build_wheels_from_source(
     license_: str | None = None,
     url: str | None = None,
     readme: str | None = None,
+    extra_libs: list[str] | None = None,
 ) -> list[str]:
     """Build Python wheels from Ruby source using Tebako.
 
@@ -536,6 +563,7 @@ def build_wheels_from_source(
         license_: License identifier
         url: Project URL
         readme: Path to README markdown file
+        extra_libs: Paths to shared libraries to bundle
 
     Returns:
         List of paths to built wheel files
@@ -582,6 +610,7 @@ def build_wheels_from_source(
             license_=license_,
             url=url,
             readme=readme,
+            extra_libs=extra_libs,
         )
 
 
@@ -675,6 +704,13 @@ def main() -> int:
         "--platform",
         help="Override platform detection (e.g., linux-amd64, only used with --source)",
     )
+    parser.add_argument(
+        "--extra-lib",
+        action="append",
+        dest="extra_libs",
+        metavar="PATH",
+        help="Shared library to bundle in the wheel (repeatable)",
+    )
 
     args = parser.parse_args()
 
@@ -698,6 +734,7 @@ def main() -> int:
                 license_=args.license_,
                 url=args.url,
                 readme=args.readme,
+                extra_libs=args.extra_libs,
             )
         elif args.binary_dir:
             binaries = detect_binaries_in_dir(args.binary_dir, args.name)
@@ -716,6 +753,7 @@ def main() -> int:
                 license_=args.license_,
                 url=args.url,
                 readme=args.readme,
+                extra_libs=args.extra_libs,
             )
         else:
             binaries = parse_binary_args(args.binaries)
@@ -733,6 +771,7 @@ def main() -> int:
                 license_=args.license_,
                 url=args.url,
                 readme=args.readme,
+                extra_libs=args.extra_libs,
             )
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
