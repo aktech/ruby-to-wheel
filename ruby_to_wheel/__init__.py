@@ -492,13 +492,11 @@ def build_with_tebako(
 
     print(f"Running: {' '.join(cmd)}")
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd)
 
     if result.returncode != 0:
         raise RuntimeError(
-            f"Tebako build failed (exit code {result.returncode}):\n"
-            f"stdout: {result.stdout}\n"
-            f"stderr: {result.stderr}"
+            f"Tebako build failed (exit code {result.returncode})"
         )
 
 

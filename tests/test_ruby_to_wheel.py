@@ -869,7 +869,7 @@ class TestDetectCurrentPlatform:
 class TestBuildWithTebako:
     def test_correct_command(self):
         with mock.patch("ruby_to_wheel.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            mock_run.return_value = mock.Mock(returncode=0)
             build_with_tebako(
                 source_dir="/src",
                 entry_point="bin/kamal",
@@ -889,13 +889,11 @@ class TestBuildWithTebako:
                     "-R",
                     "3.3.7",
                 ],
-                capture_output=True,
-                text=True,
             )
 
     def test_custom_ruby_version(self):
         with mock.patch("ruby_to_wheel.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            mock_run.return_value = mock.Mock(returncode=0)
             build_with_tebako(
                 source_dir="/src",
                 entry_point="bin/app",
@@ -908,11 +906,7 @@ class TestBuildWithTebako:
 
     def test_failure_raises_runtime_error(self):
         with mock.patch("ruby_to_wheel.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(
-                returncode=1,
-                stdout="some output",
-                stderr="some error",
-            )
+            mock_run.return_value = mock.Mock(returncode=1)
             with pytest.raises(RuntimeError, match="Tebako build failed"):
                 build_with_tebako(
                     source_dir="/src",
@@ -930,13 +924,13 @@ class TestBuildWheelsFromSource:
     def test_builds_wheel_for_current_platform(self, tmp_path):
         output_dir = tmp_path / "dist"
 
-        def fake_tebako(cmd, capture_output, text):
+        def fake_tebako(cmd):
             # Write a fake binary at the output path
             output_path = cmd[cmd.index("-o") + 1]
             with open(output_path, "w") as f:
                 f.write("#!/bin/sh\necho hello\n")
             os.chmod(output_path, 0o755)
-            return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0)
 
         with mock.patch("ruby_to_wheel.subprocess.run", side_effect=fake_tebako):
             wheels = build_wheels_from_source(
@@ -953,14 +947,14 @@ class TestBuildWheelsFromSource:
     def test_default_source_entry_point(self, tmp_path):
         output_dir = tmp_path / "dist"
 
-        def fake_tebako(cmd, capture_output, text):
+        def fake_tebako(cmd):
             output_path = cmd[cmd.index("-o") + 1]
             with open(output_path, "w") as f:
                 f.write("#!/bin/sh\necho hello\n")
             os.chmod(output_path, 0o755)
             entry = cmd[cmd.index("-e") + 1]
             assert entry == "bin/myapp"
-            return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0)
 
         with mock.patch("ruby_to_wheel.subprocess.run", side_effect=fake_tebako):
             build_wheels_from_source(
@@ -974,14 +968,14 @@ class TestBuildWheelsFromSource:
     def test_custom_source_entry_point(self, tmp_path):
         output_dir = tmp_path / "dist"
 
-        def fake_tebako(cmd, capture_output, text):
+        def fake_tebako(cmd):
             output_path = cmd[cmd.index("-o") + 1]
             with open(output_path, "w") as f:
                 f.write("#!/bin/sh\necho hello\n")
             os.chmod(output_path, 0o755)
             entry = cmd[cmd.index("-e") + 1]
             assert entry == "exe/custom"
-            return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=0)
 
         with mock.patch("ruby_to_wheel.subprocess.run", side_effect=fake_tebako):
             build_wheels_from_source(
@@ -1004,9 +998,7 @@ class TestBuildWheelsFromSource:
 
     def test_tebako_failure_propagates(self, tmp_path):
         with mock.patch("ruby_to_wheel.subprocess.run") as mock_run:
-            mock_run.return_value = mock.Mock(
-                returncode=1, stdout="", stderr="build error"
-            )
+            mock_run.return_value = mock.Mock(returncode=1)
             with pytest.raises(RuntimeError, match="Tebako build failed"):
                 build_wheels_from_source(
                     str(tmp_path),
