@@ -6,8 +6,11 @@ import csv
 import hashlib
 import io
 import os
+import platform as platform_mod
 import stat
+import subprocess
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -433,6 +436,157 @@ def build_wheels(
     return built_wheels
 
 
+def detect_current_platform() -> str:
+    """Detect the current platform and return the platform key."""
+    system = platform_mod.system().lower()
+    machine = platform_mod.machine().lower()
+
+    if system == "linux":
+        os_name = "linux"
+    elif system == "darwin":
+        os_name = "darwin"
+    elif system == "windows":
+        os_name = "windows"
+    else:
+        raise RuntimeError(f"Unsupported operating system: {system}")
+
+    if machine in ("x86_64", "amd64"):
+        arch = "amd64"
+    elif machine in ("aarch64", "arm64"):
+        arch = "arm64"
+    else:
+        raise RuntimeError(f"Unsupported architecture: {machine}")
+
+    return f"{os_name}-{arch}"
+
+
+def build_with_tebako(
+    source_dir: str,
+    entry_point: str,
+    output_path: str,
+    ruby_version: str = "3.3.7",
+) -> None:
+    """Build a standalone binary from Ruby source using Tebako.
+
+    Args:
+        source_dir: Path to the Ruby project source directory
+        entry_point: Path to the Ruby entry point file (relative to source_dir)
+        output_path: Path for the output binary
+        ruby_version: Ruby version to use for Tebako packaging
+
+    Raises:
+        RuntimeError: If the tebako build fails
+    """
+    cmd = [
+        "tebako",
+        "press",
+        "-e",
+        entry_point,
+        "-r",
+        source_dir,
+        "-o",
+        output_path,
+        "-R",
+        ruby_version,
+    ]
+
+    print(f"Running: {' '.join(cmd)}")
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Tebako build failed (exit code {result.returncode}):\n"
+            f"stdout: {result.stdout}\n"
+            f"stderr: {result.stderr}"
+        )
+
+
+def build_wheels_from_source(
+    source_dir: str,
+    *,
+    name: str,
+    version: str = "0.1.0",
+    output_dir: str = "./dist",
+    entry_point: str | None = None,
+    source_entry_point: str | None = None,
+    ruby_version: str = "3.3.7",
+    platform_key: str | None = None,
+    description: str = "Ruby binary packaged as Python wheel",
+    requires_python: str = ">=3.10",
+    author: str | None = None,
+    author_email: str | None = None,
+    license_: str | None = None,
+    url: str | None = None,
+    readme: str | None = None,
+) -> list[str]:
+    """Build Python wheels from Ruby source using Tebako.
+
+    Args:
+        source_dir: Path to the Ruby project source directory
+        name: Python package name
+        version: Package version
+        output_dir: Directory to write wheels to
+        entry_point: CLI command name (defaults to package name)
+        source_entry_point: Ruby entry point file (defaults to bin/{entry_point})
+        ruby_version: Ruby version for Tebako
+        platform_key: Override platform detection (e.g., "linux-amd64")
+        description: Package description
+        requires_python: Python version requirement
+        author: Author name
+        author_email: Author email
+        license_: License identifier
+        url: Project URL
+        readme: Path to README markdown file
+
+    Returns:
+        List of paths to built wheel files
+    """
+    if entry_point is None:
+        entry_point = name
+
+    if platform_key is None:
+        platform_key = detect_current_platform()
+
+    if platform_key not in PLATFORM_TAGS:
+        raise ValueError(
+            f"Unknown platform: {platform_key!r}. "
+            f"Supported platforms: {', '.join(sorted(PLATFORM_TAGS))}"
+        )
+
+    if source_entry_point is None:
+        source_entry_point = f"bin/{entry_point}"
+
+    print(f"Building for platform: {platform_key}")
+    print(f"Ruby entry point: {source_entry_point}")
+    print(f"Ruby version: {ruby_version}")
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        binary_path = os.path.join(tmp_dir, entry_point)
+
+        build_with_tebako(
+            source_dir=source_dir,
+            entry_point=source_entry_point,
+            output_path=binary_path,
+            ruby_version=ruby_version,
+        )
+
+        return build_wheels(
+            {platform_key: binary_path},
+            name=name,
+            version=version,
+            output_dir=output_dir,
+            entry_point=entry_point,
+            description=description,
+            requires_python=requires_python,
+            author=author,
+            author_email=author_email,
+            license_=license_,
+            url=url,
+            readme=readme,
+        )
+
+
 def main() -> int:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -454,6 +608,10 @@ def main() -> int:
     binary_group.add_argument(
         "--binary-dir",
         help="Directory containing platform-named binaries for auto-detection",
+    )
+    binary_group.add_argument(
+        "--source",
+        help="Build from Ruby source directory using Tebako",
     )
 
     parser.add_argument(
@@ -506,35 +664,79 @@ def main() -> int:
         "--readme",
         help="Path to README markdown file for PyPI long description",
     )
+    parser.add_argument(
+        "--ruby-version",
+        default="3.3.7",
+        help="Ruby version for Tebako (default: 3.3.7, only used with --source)",
+    )
+    parser.add_argument(
+        "--source-entry-point",
+        help="Ruby entry point file for Tebako (default: bin/{entry_point}, only used with --source)",
+    )
+    parser.add_argument(
+        "--platform",
+        help="Override platform detection (e.g., linux-amd64, only used with --source)",
+    )
 
     args = parser.parse_args()
 
     print(f"ruby-to-wheel v{__version__}")
 
     try:
-        if args.binary_dir:
+        if args.source:
+            wheels = build_wheels_from_source(
+                args.source,
+                name=args.name,
+                version=args.version,
+                output_dir=args.output_dir,
+                entry_point=args.entry_point,
+                source_entry_point=args.source_entry_point,
+                ruby_version=args.ruby_version,
+                platform_key=args.platform,
+                description=args.description,
+                requires_python=args.requires_python,
+                author=args.author,
+                author_email=args.author_email,
+                license_=args.license_,
+                url=args.url,
+                readme=args.readme,
+            )
+        elif args.binary_dir:
             binaries = detect_binaries_in_dir(args.binary_dir, args.name)
             print(f"Auto-detected {len(binaries)} binary(ies) in {args.binary_dir}")
+            print()
+            wheels = build_wheels(
+                binaries,
+                name=args.name,
+                version=args.version,
+                output_dir=args.output_dir,
+                entry_point=args.entry_point,
+                description=args.description,
+                requires_python=args.requires_python,
+                author=args.author,
+                author_email=args.author_email,
+                license_=args.license_,
+                url=args.url,
+                readme=args.readme,
+            )
         else:
             binaries = parse_binary_args(args.binaries)
-
-        print()
-
-        wheels = build_wheels(
-            binaries,
-            name=args.name,
-            version=args.version,
-            output_dir=args.output_dir,
-            entry_point=args.entry_point,
-            description=args.description,
-            requires_python=args.requires_python,
-            author=args.author,
-            author_email=args.author_email,
-            license_=args.license_,
-            url=args.url,
-            readme=args.readme,
-        )
-    except (FileNotFoundError, ValueError) as e:
+            print()
+            wheels = build_wheels(
+                binaries,
+                name=args.name,
+                version=args.version,
+                output_dir=args.output_dir,
+                entry_point=args.entry_point,
+                description=args.description,
+                requires_python=args.requires_python,
+                author=args.author,
+                author_email=args.author_email,
+                license_=args.license_,
+                url=args.url,
+                readme=args.readme,
+            )
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 

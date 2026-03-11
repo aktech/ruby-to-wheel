@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import zipfile
+from unittest import mock
 
 import pytest
 
@@ -15,8 +16,11 @@ from ruby_to_wheel import (
     PLATFORM_TAGS,
     build_wheel,
     build_wheels,
+    build_wheels_from_source,
+    build_with_tebako,
     compute_file_hash,
     detect_binaries_in_dir,
+    detect_current_platform,
     generate_entry_points,
     generate_init_py,
     generate_main_py,
@@ -32,6 +36,14 @@ from ruby_to_wheel import (
 def create_fake_binary(path, message="hello from ruby-to-wheel"):
     """Write a fake shell-script binary and make it executable."""
     path.write_text(f'#!/bin/sh\necho "{message}" "$@"\n')
+    path.chmod(0o755)
+
+
+def create_ruby_binary(path, message="hello from ruby-to-wheel"):
+    """Write a real Ruby script binary and make it executable."""
+    path.write_text(
+        f'#!/usr/bin/env ruby\nputs "{message} " + ARGV.join(" ")\n'
+    )
     path.chmod(0o755)
 
 
@@ -491,16 +503,24 @@ class TestWheelExecution:
         if result.returncode != 0:
             pytest.skip("uv not available")
 
-    def test_entry_point_execution(
-        self, tmp_path, current_platform, uv_available
+    @pytest.fixture()
+    def ruby_available(self):
+        result = subprocess.run(
+            ["ruby", "--version"], capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            pytest.skip("ruby not available")
+
+    def test_ruby_entry_point_execution(
+        self, tmp_path, current_platform, uv_available, ruby_available
     ):
-        binary = tmp_path / "fake-binary"
-        create_fake_binary(binary, message="hello from ruby-to-wheel")
+        binary = tmp_path / "hello-ruby"
+        create_ruby_binary(binary, message="hello from ruby-to-wheel")
 
         output_dir = tmp_path / "dist"
         wheels = build_wheels(
             {current_platform: str(binary)},
-            name="test-tool",
+            name="hello-ruby",
             version="0.1.0",
             output_dir=str(output_dir),
         )
@@ -518,9 +538,9 @@ class TestWheelExecution:
             capture_output=True,
         )
 
-        # Test entry point script
+        # Test entry point script runs a real Ruby interpreter
         result = subprocess.run(
-            [str(venv_dir / "bin" / "test-tool"), "arg1", "arg2"],
+            [str(venv_dir / "bin" / "hello-ruby"), "arg1", "arg2"],
             capture_output=True,
             text=True,
         )
@@ -528,16 +548,16 @@ class TestWheelExecution:
         assert "hello from ruby-to-wheel" in result.stdout
         assert "arg1 arg2" in result.stdout
 
-    def test_python_m_execution(
-        self, tmp_path, current_platform, uv_available
+    def test_ruby_python_m_execution(
+        self, tmp_path, current_platform, uv_available, ruby_available
     ):
-        binary = tmp_path / "fake-binary"
-        create_fake_binary(binary, message="module mode works")
+        binary = tmp_path / "hello-ruby"
+        create_ruby_binary(binary, message="ruby module mode works")
 
         output_dir = tmp_path / "dist"
         wheels = build_wheels(
             {current_platform: str(binary)},
-            name="test-tool",
+            name="hello-ruby",
             version="0.1.0",
             output_dir=str(output_dir),
         )
@@ -554,15 +574,67 @@ class TestWheelExecution:
             capture_output=True,
         )
 
-        # Test python -m execution
+        # Test python -m execution with real Ruby script
         result = subprocess.run(
-            [python, "-m", "test_tool", "arg1"],
+            [python, "-m", "hello_ruby", "arg1"],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
-        assert "module mode works" in result.stdout
+        assert "ruby module mode works" in result.stdout
         assert "arg1" in result.stdout
+
+    def test_ruby_multifile_project(
+        self, tmp_path, current_platform, uv_available, ruby_available
+    ):
+        """Package a Ruby project with multiple files as a wheel."""
+        # Create a small Ruby project structure
+        project_dir = tmp_path / "myproject"
+        lib_dir = project_dir / "lib"
+        lib_dir.mkdir(parents=True)
+        bin_dir = project_dir / "bin"
+        bin_dir.mkdir()
+
+        # lib/greeter.rb — a Ruby module
+        (lib_dir / "greeter.rb").write_text(
+            'module Greeter\n'
+            '  def self.greet(name)\n'
+            '    "Hello, #{name}! From Ruby #{RUBY_VERSION}"\n'
+            '  end\n'
+            'end\n'
+        )
+
+        # bin/greet — executable entry point that uses the lib
+        entry = bin_dir / "greet"
+        entry.write_text(
+            '#!/usr/bin/env ruby\n'
+            'require_relative "../lib/greeter"\n'
+            'puts Greeter.greet(ARGV[0] || "World")\n'
+        )
+        entry.chmod(0o755)
+
+        # Package the entry point script as the binary
+        output_dir = tmp_path / "dist"
+        wheels = build_wheels(
+            {current_platform: str(entry)},
+            name="greet",
+            version="0.2.0",
+            output_dir=str(output_dir),
+        )
+        assert len(wheels) == 1
+
+        # The wheel packages just the entry script as a binary.
+        # For a standalone binary you'd use Tebako (--source mode).
+        # Here we verify the wheel structure is correct.
+        with zipfile.ZipFile(wheels[0]) as whl:
+            names = whl.namelist()
+            assert "greet/__init__.py" in names
+            assert "greet/bin/greet" in names
+
+            # Verify the packaged binary is the real Ruby script
+            content = whl.read("greet/bin/greet").decode()
+            assert "#!/usr/bin/env ruby" in content
+            assert "Greeter.greet" in content
 
 
 # ---------------------------------------------------------------------------
@@ -709,3 +781,236 @@ class TestCLI:
         )
         assert result.returncode != 0
         assert "Unknown platform" in result.stderr
+
+    def test_cli_source_flag_in_help(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "ruby_to_wheel", "--help"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "--source" in result.stdout
+
+    def test_cli_source_mutually_exclusive_with_binary(self, tmp_path):
+        binary = tmp_path / "mybin"
+        create_fake_binary(binary)
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruby_to_wheel",
+                "--name",
+                "test",
+                "--binary",
+                f"linux-amd64={binary}",
+                "--source",
+                str(tmp_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+
+    def test_cli_source_mutually_exclusive_with_binary_dir(self, tmp_path):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "ruby_to_wheel",
+                "--name",
+                "test",
+                "--binary-dir",
+                str(tmp_path),
+                "--source",
+                str(tmp_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+
+
+# ---------------------------------------------------------------------------
+# TestDetectCurrentPlatform
+# ---------------------------------------------------------------------------
+
+
+class TestDetectCurrentPlatform:
+    def test_returns_valid_platform_key(self):
+        result = detect_current_platform()
+        assert result in PLATFORM_TAGS
+
+    def test_matches_system_info(self):
+        result = detect_current_platform()
+        system = platform.system().lower()
+        assert result.startswith(system if system != "windows" else "windows")
+
+    def test_unsupported_os(self):
+        with mock.patch("ruby_to_wheel.platform_mod") as mock_platform:
+            mock_platform.system.return_value = "FreeBSD"
+            mock_platform.machine.return_value = "x86_64"
+            with pytest.raises(RuntimeError, match="Unsupported operating system"):
+                detect_current_platform()
+
+    def test_unsupported_arch(self):
+        with mock.patch("ruby_to_wheel.platform_mod") as mock_platform:
+            mock_platform.system.return_value = "Linux"
+            mock_platform.machine.return_value = "mips"
+            with pytest.raises(RuntimeError, match="Unsupported architecture"):
+                detect_current_platform()
+
+
+# ---------------------------------------------------------------------------
+# TestBuildWithTebako
+# ---------------------------------------------------------------------------
+
+
+class TestBuildWithTebako:
+    def test_correct_command(self):
+        with mock.patch("ruby_to_wheel.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            build_with_tebako(
+                source_dir="/src",
+                entry_point="bin/kamal",
+                output_path="/out/kamal",
+                ruby_version="3.3.7",
+            )
+            mock_run.assert_called_once_with(
+                [
+                    "tebako",
+                    "press",
+                    "-e",
+                    "bin/kamal",
+                    "-r",
+                    "/src",
+                    "-o",
+                    "/out/kamal",
+                    "-R",
+                    "3.3.7",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+    def test_custom_ruby_version(self):
+        with mock.patch("ruby_to_wheel.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+            build_with_tebako(
+                source_dir="/src",
+                entry_point="bin/app",
+                output_path="/out/app",
+                ruby_version="3.2.0",
+            )
+            cmd = mock_run.call_args[0][0]
+            assert "-R" in cmd
+            assert cmd[cmd.index("-R") + 1] == "3.2.0"
+
+    def test_failure_raises_runtime_error(self):
+        with mock.patch("ruby_to_wheel.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(
+                returncode=1,
+                stdout="some output",
+                stderr="some error",
+            )
+            with pytest.raises(RuntimeError, match="Tebako build failed"):
+                build_with_tebako(
+                    source_dir="/src",
+                    entry_point="bin/app",
+                    output_path="/out/app",
+                )
+
+
+# ---------------------------------------------------------------------------
+# TestBuildWheelsFromSource
+# ---------------------------------------------------------------------------
+
+
+class TestBuildWheelsFromSource:
+    def test_builds_wheel_for_current_platform(self, tmp_path):
+        output_dir = tmp_path / "dist"
+
+        def fake_tebako(cmd, capture_output, text):
+            # Write a fake binary at the output path
+            output_path = cmd[cmd.index("-o") + 1]
+            with open(output_path, "w") as f:
+                f.write("#!/bin/sh\necho hello\n")
+            os.chmod(output_path, 0o755)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("ruby_to_wheel.subprocess.run", side_effect=fake_tebako):
+            wheels = build_wheels_from_source(
+                str(tmp_path),
+                name="myapp",
+                version="1.0.0",
+                output_dir=str(output_dir),
+                platform_key="linux-amd64",
+            )
+
+        assert len(wheels) == 1
+        assert "manylinux_2_17_x86_64" in os.path.basename(wheels[0])
+
+    def test_default_source_entry_point(self, tmp_path):
+        output_dir = tmp_path / "dist"
+
+        def fake_tebako(cmd, capture_output, text):
+            output_path = cmd[cmd.index("-o") + 1]
+            with open(output_path, "w") as f:
+                f.write("#!/bin/sh\necho hello\n")
+            os.chmod(output_path, 0o755)
+            entry = cmd[cmd.index("-e") + 1]
+            assert entry == "bin/myapp"
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("ruby_to_wheel.subprocess.run", side_effect=fake_tebako):
+            build_wheels_from_source(
+                str(tmp_path),
+                name="myapp",
+                version="1.0.0",
+                output_dir=str(output_dir),
+                platform_key="linux-amd64",
+            )
+
+    def test_custom_source_entry_point(self, tmp_path):
+        output_dir = tmp_path / "dist"
+
+        def fake_tebako(cmd, capture_output, text):
+            output_path = cmd[cmd.index("-o") + 1]
+            with open(output_path, "w") as f:
+                f.write("#!/bin/sh\necho hello\n")
+            os.chmod(output_path, 0o755)
+            entry = cmd[cmd.index("-e") + 1]
+            assert entry == "exe/custom"
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("ruby_to_wheel.subprocess.run", side_effect=fake_tebako):
+            build_wheels_from_source(
+                str(tmp_path),
+                name="myapp",
+                version="1.0.0",
+                output_dir=str(output_dir),
+                source_entry_point="exe/custom",
+                platform_key="linux-amd64",
+            )
+
+    def test_unknown_platform_raises(self, tmp_path):
+        with pytest.raises(ValueError, match="Unknown platform"):
+            build_wheels_from_source(
+                str(tmp_path),
+                name="myapp",
+                version="1.0.0",
+                platform_key="freebsd-amd64",
+            )
+
+    def test_tebako_failure_propagates(self, tmp_path):
+        with mock.patch("ruby_to_wheel.subprocess.run") as mock_run:
+            mock_run.return_value = mock.Mock(
+                returncode=1, stdout="", stderr="build error"
+            )
+            with pytest.raises(RuntimeError, match="Tebako build failed"):
+                build_wheels_from_source(
+                    str(tmp_path),
+                    name="myapp",
+                    version="1.0.0",
+                    platform_key="linux-amd64",
+                )
