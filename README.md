@@ -97,6 +97,12 @@ Each generated wheel contains:
 
 When installed, `pip` creates a wrapper script so the binary can be invoked directly by name from the command line.
 
+## See Also
+
+- [go-to-wheel](https://github.com/simonw/go-to-wheel) - The Go equivalent that inspired this tool
+- [maturin](https://github.com/PyO3/maturin) - The Rust equivalent
+- [pip-binary-factory](https://github.com/ports-fwd/pip-binary-factory) - Template for packaging pre-built binaries
+
 ## License
 
 Apache-2.0
